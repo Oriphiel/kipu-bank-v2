@@ -112,4 +112,33 @@ contract KipuBankV2 is Ownable, ReentrancyGuard {
         bankCapUSD = _initialBankCapUSD;
     }
 
+    // ==============================================================================
+    // Oracle & Conversion Functions
+    // ==============================================================================
+
+    /**
+     * @notice Converts an amount of ETH to its USD value using the Chainlink oracle.
+     * @dev Chainlink crypto/USD price feeds typically have 8 decimals.
+     * @param _tokenAddress The address of the token (this implementation only supports NATIVE_TOKEN).
+     * @param _amount The amount of the token in its smallest unit (e.g., wei for ETH).
+     * @return valueUSD The value in USD, with 8 decimal places.
+     */
+    function getUSDValue(address _tokenAddress, uint256 _amount) public view returns (uint256 valueUSD) {
+        if (_amount == 0) return 0;
+        
+        // @dev For this project, we only support ETH price conversion. A production system would
+        // need a registry of oracles for different tokens.
+        if (_tokenAddress != NATIVE_TOKEN) {
+            return 0; // Or revert, depending on desired behavior for unsupported tokens.
+        }
+
+        (, int256 price, , , ) = priceFeed.latestRoundData();
+        if (price <= 0) revert OracleFailed("Invalid oracle price");
+        
+        // ETH has 18 decimals, the price has 8 decimals.
+        // Formula: (amount * price) / 10**18. Multiply first to preserve precision.
+        // The final result will have 8 decimals.
+        valueUSD = (_amount * uint256(price)) / 10**18;
+    }
+
 }
