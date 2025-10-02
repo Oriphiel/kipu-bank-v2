@@ -4,6 +4,7 @@ pragma solidity ^0.8.30;
 // OpenZeppelin and Chainlink imports 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /**
@@ -13,7 +14,7 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
  * @dev This contract manages deposits and withdrawals for both ETH and ERC-20 tokens. It uses a Chainlink
  *      oracle for a dynamic capital limit and OpenZeppelin's Ownable for access control.
  */
-contract KipuBankV2 is Ownable, ReentrancyGuard {
+contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
     
     // ==============================================================================
     // Type Declarations & Constants
@@ -139,6 +140,27 @@ contract KipuBankV2 is Ownable, ReentrancyGuard {
         // Formula: (amount * price) / 10**18. Multiply first to preserve precision.
         // The final result will have 8 decimals.
         valueUSD = (_amount * uint256(price)) / 10**18;
+    }
+
+    // ==============================================================================
+    // Administrative Functions
+    // ==============================================================================
+
+    /**
+     * @notice Allows the owner to update the bank's capital limit.
+     * @param _newBankCapUSD The new limit in USD, expressed with 8 decimals.
+     */
+    function setBankCap(uint256 _newBankCapUSD) external onlyOwner nonReentrant whenNotPaused {
+        bankCapUSD = _newBankCapUSD;
+    }
+    
+    /**
+     * @notice Allows the owner to update the price feed oracle address.
+     * @param _newPriceFeedAddress The new address of the oracle contract.
+     */
+    function setPriceFeed(address _newPriceFeedAddress) external onlyOwner nonReentrant whenNotPaused{
+        if (_newPriceFeedAddress == address(0)) revert InvalidAddress("Price feed cannot be address zero");
+        priceFeed = AggregatorV3Interface(_newPriceFeedAddress);
     }
 
 }
