@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 // OpenZeppelin and Chainlink imports 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
@@ -124,7 +125,7 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      * @param _amount The amount of the token in its smallest unit (e.g., wei for ETH).
      * @return valueUSD The value in USD, with 8 decimal places.
      */
-    function getUSDValue(address _tokenAddress, uint256 _amount) public view returns (uint256 valueUSD) {
+    function getUSDValue(address _tokenAddress, uint256 _amount) public view whenNotPaused returns (uint256 valueUSD) {
         if (_amount == 0) return 0;
         
         // @dev For this project, we only support ETH price conversion. A production system would
@@ -150,7 +151,7 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      * @notice Allows the owner to update the bank's capital limit.
      * @param _newBankCapUSD The new limit in USD, expressed with 8 decimals.
      */
-    function setBankCap(uint256 _newBankCapUSD) external onlyOwner nonReentrant whenNotPaused {
+    function setBankCap(uint256 _newBankCapUSD) external onlyOwner whenNotPaused {
         bankCapUSD = _newBankCapUSD;
     }
     
@@ -158,9 +159,107 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      * @notice Allows the owner to update the price feed oracle address.
      * @param _newPriceFeedAddress The new address of the oracle contract.
      */
-    function setPriceFeed(address _newPriceFeedAddress) external onlyOwner nonReentrant whenNotPaused{
+    function setPriceFeed(address _newPriceFeedAddress) external onlyOwner whenNotPaused{
         if (_newPriceFeedAddress == address(0)) revert InvalidAddress("Price feed cannot be address zero");
         priceFeed = AggregatorV3Interface(_newPriceFeedAddress);
+    }
+
+    /**
+     * @notice Pauses all token transfers. Can only be called by the owner.
+     * @dev This public function acts as a gateway to the internal _pause() function
+     *      from the Pausable contract, securing it with the onlyOwner modifier.
+     */
+    function pause() public onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @notice Unpauses the contract, resuming all token transfers. Can only be called by the owner.
+     * @dev This public function acts as a gateway to the internal _unpause() function
+     *      from the Pausable contract, securing it with the onlyOwner modifier.
+     */
+    function unpause() public onlyOwner {
+        _unpause();
+    }
+
+
+    // ==============================================================================
+    // Deposit Functions
+    // ==============================================================================
+
+    /**
+     * @notice Deposits ETH into the bank.
+     * @dev Uses the NATIVE_TOKEN address (address(0)) for internal accounting.
+     *      The function is payable to receive ETH.
+     */
+    function depositNative() external payable nonReentrant whenNotPaused{
+        require(msg.value > 0, "Deposit amount must be positive");
+        
+        // Check against the USD cap. `address(this).balance` already includes msg.value.
+        uint256 currentTotalValueUSD = getUSDValue(NATIVE_TOKEN, address(this).balance);
+        if (currentTotalValueUSD > bankCapUSD) {
+            uint256 depositValueUSD = getUSDValue(NATIVE_TOKEN, msg.value);
+            revert BankCapExceeded(currentTotalValueUSD - depositValueUSD, depositValueUSD, bankCapUSD);
+        }
+        
+        // Effect: Update user's native token balance.
+        userBalances[msg.sender][NATIVE_TOKEN] += msg.value;
+        emit Deposit(msg.sender, NATIVE_TOKEN, msg.value);
+    }
+    
+    /**
+     * @notice Deposits an ERC-20 token into the bank.
+     * @dev The caller must first approve this contract to spend their tokens by calling `approve()` on the ERC-20 contract.
+     * @param _tokenAddress The address of the ERC-20 token to deposit.
+     * @param _amount The amount of tokens to deposit (in the token's smallest unit).
+     */
+    function depositToken(address _tokenAddress, uint256 _amount) external nonReentrant whenNotPaused{
+        if (_tokenAddress == NATIVE_TOKEN) revert InvalidAddress("Use depositNative() for ETH");
+        require(_amount > 0, "Deposit amount must be positive");
+
+        // @dev As per design decisions, only native token value is checked against the cap.
+        // Reverting for other tokens would be safer if no price feed is available.
+        // For this exercise, we acknowledge the limitation. A production system would
+        // require a price feed registry.
+        
+        // Effect: Update user's token balance first (Checks-Effects-Interactions).
+        userBalances[msg.sender][_tokenAddress] += _amount;
+        
+        // Interaction: Pull the tokens from the user to this contract.
+        bool success = IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _amount);
+        if (!success) revert TransferFailed("ERC20 transferFrom failed");
+        
+        emit Deposit(msg.sender, _tokenAddress, _amount);
+    }
+
+    // ==============================================================================
+    // Withdrawal Functions
+    // ==============================================================================
+
+    /**
+     * @notice Withdraws ETH or an ERC-20 token from the bank.
+     * @param _tokenAddress The address of the asset to withdraw (use address(0) for ETH).
+     * @param _amount The amount to withdraw.
+     */
+    function withdraw(address _tokenAddress, uint256 _amount) external nonReentrant whenNotPaused{
+        require(_amount > 0, "Withdraw amount must be positive");
+
+        uint256 userBalance = userBalances[msg.sender][_tokenAddress];
+        if (userBalance < _amount) revert InsufficientBalance(userBalance, _amount);
+        
+        // Effect: Update the state BEFORE the external call.
+        userBalances[msg.sender][_tokenAddress] = userBalance - _amount;
+        
+        // Interaction: Send the funds to the user.
+        if (_tokenAddress == NATIVE_TOKEN) {
+            (bool success, ) = msg.sender.call{value: _amount}("");
+            if (!success) revert TransferFailed("Native token transfer failed");
+        } else {
+            bool success = IERC20(_tokenAddress).transfer(msg.sender, _amount);
+            if (!success) revert TransferFailed("ERC20 transfer failed");
+        }
+        
+        emit Withdrawal(msg.sender, _tokenAddress, _amount);
     }
 
 }
