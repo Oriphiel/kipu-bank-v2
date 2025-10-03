@@ -3,6 +3,7 @@ pragma solidity ^0.8.30;
 
 // OpenZeppelin and Chainlink imports 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
@@ -16,6 +17,7 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
  *      oracle for a dynamic capital limit and OpenZeppelin's Ownable for access control.
  */
 contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
+    using SafeERC20 for IERC20; // Enabled secure methods
     
     // ==============================================================================
     // Type Declarations & Constants
@@ -46,6 +48,13 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      *      userAddress => tokenAddress => amount
      */
     mapping(address => mapping(address => uint256)) public userBalances;
+
+    /**
+     * @notice A whitelist of supported ERC-20 token addresses.
+     * @dev Maps a token address to a boolean indicating if it's supported (true) or not (false).
+     *      ETH (address(0)) is always implicitly supported.
+     */
+    mapping(address => bool) public isTokenSupported;
 
     // ==============================================================================
     // Events & Custom Errors
@@ -125,7 +134,7 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      * @param _amount The amount of the token in its smallest unit (e.g., wei for ETH).
      * @return valueUSD The value in USD, with 8 decimal places.
      */
-    function getUSDValue(address _tokenAddress, uint256 _amount) public view whenNotPaused returns (uint256 valueUSD) {
+    function getUSDValue(address _tokenAddress, uint256 _amount) public view  whenNotPaused returns (uint256 valueUSD) {
         if (_amount == 0) return 0;
         
         // @dev For this project, we only support ETH price conversion. A production system would
@@ -182,6 +191,24 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
         _unpause();
     }
 
+    /**
+     * @notice Allows the owner to add a new ERC-20 token to the list of supported assets.
+     * @param _tokenAddress The address of the ERC-20 token to support.
+     */
+    function supportNewToken(address _tokenAddress) external onlyOwner whenNotPaused{
+        if (_tokenAddress == NATIVE_TOKEN) revert InvalidAddress("Native token is supported by default");
+        isTokenSupported[_tokenAddress] = true;
+    }
+
+    /**
+     * @notice Allows the owner to remove an ERC-20 token from the list of supported assets.
+     * @dev This does not affect existing deposits of the token.
+     * @param _tokenAddress The address of the ERC-20 token to remove.
+     */
+    function removeTokenSupport(address _tokenAddress) external onlyOwner whenNotPaused{
+        isTokenSupported[_tokenAddress] = false;
+    }
+
 
     // ==============================================================================
     // Deposit Functions
@@ -215,19 +242,33 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
      */
     function depositToken(address _tokenAddress, uint256 _amount) external nonReentrant whenNotPaused{
         if (_tokenAddress == NATIVE_TOKEN) revert InvalidAddress("Use depositNative() for ETH");
+        
+        require(isTokenSupported[_tokenAddress], "Token is not supported");
+
         require(_amount > 0, "Deposit amount must be positive");
+        
 
         // @dev As per design decisions, only native token value is checked against the cap.
         // Reverting for other tokens would be safer if no price feed is available.
         // For this exercise, we acknowledge the limitation. A production system would
         // require a price feed registry.
         
-        // Effect: Update user's token balance first (Checks-Effects-Interactions).
-        userBalances[msg.sender][_tokenAddress] += _amount;
+  
         
         // Interaction: Pull the tokens from the user to this contract.
-        bool success = IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _amount);
-        if (!success) revert TransferFailed("ERC20 transferFrom failed");
+        // @dev We use the "balance difference" pattern to accurately account for tokens that may
+        // charge a fee on transfer (fee-on-transfer tokens). This involves checking the contract's
+        // token balance before and after the `safeTransferFrom` call to ensure the user is only
+        // credited for the amount that was actually received. This pattern necessarily places the
+        // interaction before the effect, and its security against re-entrancy is guaranteed by the
+        // `nonReentrant` modifier on this function.
+        uint256 balanceBefore = IERC20(_tokenAddress).balanceOf(address(this));
+        IERC20(_tokenAddress).safeTransferFrom(msg.sender, address(this), _amount);
+        uint256 balanceAfter = IERC20(_tokenAddress).balanceOf(address(this));
+        uint256 amountReceived = balanceAfter - balanceBefore;
+        
+        // Effect: Update user's token balance first (Checks-Effects-Interactions).
+        userBalances[msg.sender][_tokenAddress] += amountReceived;
         
         emit Deposit(msg.sender, _tokenAddress, _amount);
     }
@@ -255,8 +296,7 @@ contract KipuBankV2 is Ownable, ReentrancyGuard, Pausable {
             (bool success, ) = msg.sender.call{value: _amount}("");
             if (!success) revert TransferFailed("Native token transfer failed");
         } else {
-            bool success = IERC20(_tokenAddress).transfer(msg.sender, _amount);
-            if (!success) revert TransferFailed("ERC20 transfer failed");
+            IERC20(_tokenAddress).safeTransfer(msg.sender, _amount);
         }
         
         emit Withdrawal(msg.sender, _tokenAddress, _amount);
