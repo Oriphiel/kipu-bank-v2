@@ -98,4 +98,4 @@ You can now interact with your verified contract directly on Etherscan's `Read C
 
 ---
 **Deployed Contract Address (Sepolia Testnet):**
-`[Paste your verified Etherscan contract address here]`
+`https://sepolia.etherscan.io/address/0x7bCD8cf21519DB30f3f9b4b8690Fb993C9d4bDFE`
